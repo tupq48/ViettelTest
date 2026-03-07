@@ -36,11 +36,14 @@ typedef struct {
 PagingQueue_t paging_queue;
 
 int32_t initUserAddress(struct sockaddr_in* ue_addr);
-void sendMIB(int32_t sockfd, const struct sockaddr_in* ue_addr, uint16_t sfn);
 int32_t initPagingServer(struct sockaddr_in* server_addr);
-void* pagingServerThread(void* arg);
-void* pagingWorkerThread(void* arg);
-void enqueuePagingMessage(PagingQueue_t* queue, const PagingQueueItem_t* item);
+
+void    sendMIB(int32_t sockfd, const struct sockaddr_in* ue_addr, uint16_t sfn);
+
+void*   pagingServerThread(void* arg);
+void*   pagingWorkerThread(void* arg);
+
+void    enqueuePagingMessage(PagingQueue_t* queue, const PagingQueueItem_t* item);
 int32_t dequeuePagingMessage(PagingQueue_t* queue, PagingQueueItem_t* item);
 
 int main() {
