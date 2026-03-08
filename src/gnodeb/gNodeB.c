@@ -8,19 +8,95 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include "gNodeB.h"
+#include "worker.h"
 
 
 atomic_int          gNodeB_sfn = 0;
+pthread_t           paging_thread;
 
 int32_t             ue_sockfd;
 struct sockaddr_in  ue_addr;
 
-int32_t             paging_sockfd;
-struct sockaddr_in  paging_server_addr;
+int32_t             amf_sockfd;
+struct sockaddr_in  amf_addr;
 
-PagingQueue_t paging_queue;
+Worker_t            worker;
+/*
+    Biến dùng để tracking việc gNodeB có đang chạy hay không
+*/
+atomic_int          running = 1;
 
-int32_t initUserAddress(struct sockaddr_in* ue_addr) {
+int32_t _initUE(struct sockaddr_in* ue_addr);
+int32_t _initAMF(struct sockaddr_in* server_addr);
+
+void _sendMIB(int32_t sockfd, const struct sockaddr_in* ue_addr, uint16_t sfn);
+void _pagingItemHandler(WorkerQueueItem_t item);
+
+void* _pagingReceiverThread(void* arg);
+
+int32_t gNodeBInit() {
+    ue_sockfd = _initUE(&ue_addr);
+    if (ue_sockfd < 0) {
+        printf("Khởi tạo địa chỉ UE thất bại\n");
+        return -1;
+    }
+
+    amf_sockfd = _initAMF(&amf_addr);
+    if (amf_sockfd < 0) {
+        printf("Khởi tạo AMF thất bại\n");
+        close(ue_sockfd);
+        return -1;
+    }
+    
+    return 0;
+}
+
+int32_t gNodeBStart() {
+    /* Khởi tạo paging server thread */
+    if (pthread_create(&paging_thread, NULL, _pagingReceiverThread, &amf_sockfd) != 0) {
+        printf("Khởi tạo paging thread thất bại\n");
+        gNodeBStop();
+        return -1;
+    }
+
+    /* Khởi tạo worker module (queue + callback) */
+    workerInit(&worker, _pagingItemHandler, NUM_WORKER_THREADS);
+    if (workerStart(&worker) != 0) {
+        printf("Khởi tạo worker threads thất bại\n");
+        gNodeBStop();
+        return -1;
+    }
+
+    printf("[gNodeB] Bắt đầu phát sóng...\n");
+
+    while (atomic_load(&running)) {
+        if (atomic_load(&gNodeB_sfn) % MIB_CYCLE == 0) {
+            _sendMIB(ue_sockfd, &ue_addr, atomic_load(&gNodeB_sfn));
+        }
+
+        usleep(SFN_INCREASE_TIME_MS * 1000);
+        atomic_store(&gNodeB_sfn,
+                     (atomic_load(&gNodeB_sfn) + 1) % (MAX_SFN + 1));
+        
+        if (atomic_load(&gNodeB_sfn) % 100 == 0)
+            printf("[gNodeB] SFN hiện tại: %d\n", atomic_load(&gNodeB_sfn));
+    }
+
+    return 0;
+}
+
+void gNodeBStop() {
+    atomic_store(&running, 0);
+
+    /* Đóng socket và dừng thread */
+    close(ue_sockfd);
+    close(amf_sockfd);
+    pthread_cancel(paging_thread);
+    pthread_join(paging_thread, NULL);
+    workerStop(&worker);
+}
+
+int32_t _initUE(struct sockaddr_in* ue_addr) {
     int32_t sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
         perror("socket");
@@ -35,16 +111,7 @@ int32_t initUserAddress(struct sockaddr_in* ue_addr) {
     return sockfd;
 }
 
-void sendMIB(int32_t sockfd, const struct sockaddr_in* ue_addr, uint16_t sfn) {
-    MIB_t mib = {MESSAGE_MIB_ID, htons(sfn)};
-    sendto(sockfd, &mib,
-           sizeof(mib), 0,
-           (struct sockaddr*) ue_addr,
-           sizeof(*ue_addr)
-    );
-}
-
-int32_t initPagingServer(struct sockaddr_in* server_addr) {
+int32_t _initAMF(struct sockaddr_in* server_addr) {
     int32_t sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         perror("socket");
@@ -68,43 +135,22 @@ int32_t initPagingServer(struct sockaddr_in* server_addr) {
         return -1;
     }
 
-    printf("[gNodeB] Paging server đã sẵn sàng tại port %d\n", GNODEB_TCP_PORT);
+    printf("[gNodeB] AMF listener server đã sẵn sàng tại port %d\n", GNODEB_TCP_PORT);
     return sockfd;
 }
 
-void enqueuePagingMessage(PagingQueue_t* queue, const PagingQueueItem_t* item) {
-    pthread_mutex_lock(&queue->mutex);
-    
-    if (queue->count >= PAGING_QUEUE_SIZE) {
-        printf("[gNodeB] Queue đầy, bỏ qua paging message\n");
-        pthread_mutex_unlock(&queue->mutex);
-        return;
-    }
-
-    queue->items[queue->tail] = *item;
-    queue->tail = (queue->tail + 1) % PAGING_QUEUE_SIZE;
-    queue->count++;
-
-    pthread_cond_signal(&queue->cond);
-    pthread_mutex_unlock(&queue->mutex);
+void _sendMIB(int32_t sockfd, const struct sockaddr_in* ue_addr, uint16_t sfn) {
+    MIB_t mib = {MESSAGE_MIB_ID, htons(sfn)};
+    sendto(sockfd, &mib,
+           sizeof(mib), 0,
+           (struct sockaddr*) ue_addr,
+           sizeof(*ue_addr)
+    );
 }
 
-int32_t dequeuePagingMessage(PagingQueue_t* queue, PagingQueueItem_t* item) {
-    pthread_mutex_lock(&queue->mutex);
-    
-    while (queue->count == 0) {
-        pthread_cond_wait(&queue->cond, &queue->mutex);
-    }
 
-    *item = queue->items[queue->head];
-    queue->head = (queue->head + 1) % PAGING_QUEUE_SIZE;
-    queue->count--;
 
-    pthread_mutex_unlock(&queue->mutex);
-    return 0;
-}
-
-void* pagingServerThread(void* arg) {
+void* _pagingReceiverThread(void* arg) {
     int32_t server_sockfd = *(int32_t*) arg;
     while (1) {
         struct sockaddr_in client_addr;
@@ -131,15 +177,14 @@ void* pagingServerThread(void* arg) {
             printf("[gNodeB] Nhận NGAP Paging: UE ID=%u, TAC=%u, CN Domain=%u\n",
                    paging_message.ueId, paging_message.TAC, paging_message.cn_domain);
 
-            /* Đưa vào queue để worker xử lý */
-            PagingQueueItem_t queue_item = {
-                .message = paging_message,
-                .receive_time = 0
-            };
-            enqueuePagingMessage(&paging_queue, &queue_item);
+            Paging_t *item = malloc(sizeof(*item));
+            if (item) {
+                *item = paging_message;
+                workerEnqueue(&worker, item);
+            }
 
-            /* Gửi ACK */
-            const char* response = "Paging message received";
+            /* response AMF */
+            const char* response = "Đã nhận paging message";
             send(client_sockfd, response, strlen(response), 0);
         }
 
@@ -148,36 +193,27 @@ void* pagingServerThread(void* arg) {
     return NULL;
 }
 
-void* pagingWorkerThread(void* arg) {
-    (void)arg;
-    PagingQueueItem_t queue_item;
+void _pagingItemHandler(WorkerQueueItem_t raw) {
+    Paging_t *paging = (Paging_t*)raw;
+    int32_t ue_id = paging->ueId;
 
+    printf("[Worker] Processing paging for UE ID=%u\n", ue_id);
+
+    /* wait for the correct SFN */
     while (1) {
-        /* Lấy paging message từ queue */
-        dequeuePagingMessage(&paging_queue, &queue_item);
-        
-        Paging_t* paging = &queue_item.message;
-        int32_t ue_id = paging->ueId;
+        int32_t current_sfn = atomic_load(&gNodeB_sfn);
+        int32_t left_side = (current_sfn + PAGING_FRAME_OFFSET) % PAGING_CYCLE;
+        int32_t right_side = (PAGING_CYCLE / PF_PER_CYCLE) * (ue_id % PF_PER_CYCLE);
 
-        printf("[Worker] Xử lý paging cho UE ID=%u\n", ue_id);
-
-        /* Chờ khớp điều kiện SFN */
-        while (1) {
-            int32_t current_sfn = atomic_load(&gNodeB_sfn);
-            int32_t left_side = (current_sfn + PAGING_FRAME_OFFSET) % PAGING_CYCLE;
-            int32_t right_side = (PAGING_CYCLE / PF_PER_CYCLE) * (ue_id % PF_PER_CYCLE);
-
-            if (left_side == right_side) {
-                /* Gửi RRC Paging tới UE */
-                sendto(ue_sockfd, paging, sizeof(Paging_t), 0,
-                       (struct sockaddr*) &ue_addr, sizeof(ue_addr));
-                printf("[Worker] Gửi RRC Paging tới UE ID=%u tại SFN=%d\n", 
-                       ue_id, current_sfn);
-                break;
-            }
-
-            usleep(1000); /* Chờ 1ms trước khi kiểm tra lại */
+        if (left_side == right_side) {
+            sendto(ue_sockfd, paging, sizeof(Paging_t), 0,
+                   (struct sockaddr*) &ue_addr, sizeof(ue_addr));
+            printf("[Worker] Sent RRC Paging to UE ID=%u at SFN=%d\n", ue_id, current_sfn);
+            break;
         }
+
+        usleep(1000);
     }
-    return NULL;
+
+    free(paging);
 }

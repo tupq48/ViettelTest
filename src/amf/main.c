@@ -1,55 +1,59 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
 #include "AMF.h"
-#include "../../include/common.h"
+#include "common.h"
 
-#define BUFFER_SIZE 1024
+static void _handleSendPagingMessage();
 
 int main() {
-    int sock = 0;
-    struct sockaddr_in serv_addr;
-    char buffer[BUFFER_SIZE] = {0};
-
-    sock = initGNodeBAddress(&serv_addr);
-    if (sock < 0) {
-        printf("Failed to initialize gNodeB address\n");
+    if (AMFInit() < 0) {
+        printf("Failed to initialize AMF\n");
         return -1;
     }
 
-    printf("Connected to gNodeB server at %s:%d\n", GNODEB_SERVER_IP, GNODEB_TCP_PORT);
-
-    // Prepare NGAP Paging message
-    Paging_t paging_message = {
-        .messageType = NGAP_PAGING_MESSAGE_TYPE,
-        .ueId        = UE_ID_DEFAULT,
-        .TAC         = TAC_PAGING_VALUE,
-        .cn_domain   = CN_DOMAIN_NORMAL_CALL
-    };
-    const size_t message_len = sizeof(paging_message);
-
-    // Send paging message to gNodeB
-    if (send(sock, &paging_message, message_len, 0) < 0) {
-        perror("send");
-        close(sock);
-        return -1;
+    while (1) {
+        printf("\n--- AMF Simulator ---\n");
+        printf("1. Send Paging Message (UE ID: %d)\n", UE_ID_DEFAULT);
+        printf("0. Exit\n");
+        printf("Enter your choice: ");
+        int choice;
+        scanf("%d", &choice);
+        switch (choice) {
+            case 1:
+                _handleSendPagingMessage();
+                break;
+            case 0:
+                AMFStop();
+                printf("Exiting AMF Simulator...\n");
+                return 0;
+            default:
+                printf("Invalid choice. Please try again.\n");
+        }
     }
+}
 
-    printf("Sent NGAP Paging message to gNodeB\n");
-
-    // Receive response from gNodeB
-    const size_t recv_len = recv(sock, buffer, BUFFER_SIZE - 1, 0);
-    if (recv_len < 0) {
-        perror("recv");
-        close(sock);
-        return -1;
+static void _handleSendPagingMessage() {
+    printf("Choose CNDomain type:\n");
+    printf("1. Normal Call\n");
+    printf("2. Data App Call\n");
+    printf("Enter your choice: ");
+    int type_choice;
+    scanf("%d", &type_choice);
+    Paging_t paging_message;
+    switch (type_choice) {
+        case 1:
+            paging_message.cn_domain = CN_DOMAIN_NORMAL_CALL;
+            break;
+        case 2:
+            paging_message.cn_domain = CN_DOMAIN_DATA_CALL;
+            break;
+        default:
+            printf("Invalid choice. Returning to main menu.\n");
+            return;
     }
-
-    buffer[recv_len] = '\0';
-    printf("Received response: %s\n", buffer);
-    close(sock);
-    return 0;
+    paging_message.TAC = TAC_PAGING_VALUE;
+    paging_message.ueId = UE_ID_DEFAULT;
+    paging_message.messageType = NGAP_PAGING_MESSAGE_TYPE;
+    if (AMFSendPagingMessage(&paging_message) < 0) {
+        printf("Failed to send Paging Message\n");
+    }
 }

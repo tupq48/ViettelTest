@@ -1,3 +1,6 @@
+#ifndef COMMON_H
+#define COMMON_H
+
 #include <stdint.h>
 
 #define MESSAGE_MIB_ID                  0x01
@@ -27,6 +30,11 @@
 #define NUM_WORKER_THREADS              4
 #define PAGING_QUEUE_SIZE               100
 
+/* generic worker queue size; paging uses same default */
+#ifndef WORKER_QUEUE_SIZE
+#define WORKER_QUEUE_SIZE PAGING_QUEUE_SIZE
+#endif
+
 /*
     Bản tin MIB struct
 */
@@ -52,3 +60,5 @@ typedef struct {
     uint32_t TAC;
     uint32_t cn_domain;
 } Paging_t;
+
+#endif // COMMON_H
